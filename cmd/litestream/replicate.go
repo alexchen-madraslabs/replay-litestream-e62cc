@@ -89,7 +89,7 @@ func (c *ReplicateCommand) ParseFlags(ctx context.Context, args []string) (err e
 // Run loads all databases specified in the configuration.
 func (c *ReplicateCommand) Run() (err error) {
 	// Display version information.
-	slog.Info("litestream", "version", Version)
+	slog.Info("litestream", "version", Version, "level", c.Config.Logging.Level)
 
 	// Start MCP server if enabled
 	if c.Config.MCPAddr != "" {
@@ -120,23 +120,22 @@ func (c *ReplicateCommand) Run() (err error) {
 
 	// Notify user that initialization is done.
 	for _, db := range c.DBs {
+		r := db.Replica
 		slog.Info("initialized db", "path", db.Path())
-		for _, r := range db.Replicas {
-			slog := slog.With("name", r.Name(), "type", r.Client.Type(), "sync-interval", r.SyncInterval)
-			switch client := r.Client.(type) {
-			case *file.ReplicaClient:
-				slog.Info("replicating to", "path", client.Path())
-			case *s3.ReplicaClient:
-				slog.Info("replicating to", "bucket", client.Bucket, "path", client.Path, "region", client.Region, "endpoint", client.Endpoint)
-			case *gcs.ReplicaClient:
-				slog.Info("replicating to", "bucket", client.Bucket, "path", client.Path)
-			case *abs.ReplicaClient:
-				slog.Info("replicating to", "bucket", client.Bucket, "path", client.Path, "endpoint", client.Endpoint)
-			case *sftp.ReplicaClient:
-				slog.Info("replicating to", "host", client.Host, "user", client.User, "path", client.Path)
-			default:
-				slog.Info("replicating to")
-			}
+		slog := slog.With("name", r.Name(), "type", r.Client.Type(), "sync-interval", r.SyncInterval)
+		switch client := r.Client.(type) {
+		case *file.ReplicaClient:
+			slog.Info("replicating to", "path", client.Path())
+		case *s3.ReplicaClient:
+			slog.Info("replicating to", "bucket", client.Bucket, "path", client.Path, "region", client.Region, "endpoint", client.Endpoint)
+		case *gcs.ReplicaClient:
+			slog.Info("replicating to", "bucket", client.Bucket, "path", client.Path)
+		case *abs.ReplicaClient:
+			slog.Info("replicating to", "bucket", client.Bucket, "path", client.Path, "endpoint", client.Endpoint)
+		case *sftp.ReplicaClient:
+			slog.Info("replicating to", "host", client.Host, "user", client.User, "path", client.Path)
+		default:
+			slog.Info("replicating to")
 		}
 	}
 

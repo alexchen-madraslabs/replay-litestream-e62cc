@@ -12,7 +12,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +23,7 @@ import (
 	"github.com/benbjohnson/litestream/s3"
 	"github.com/benbjohnson/litestream/sftp"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/superfly/ltx"
 	"gopkg.in/yaml.v2"
 )
 
@@ -74,8 +74,6 @@ func (m *Main) Run(ctx context.Context, args []string) (err error) {
 	switch cmd {
 	case "databases":
 		return (&DatabasesCommand{}).Run(ctx, args)
-	case "generations":
-		return (&GenerationsCommand{}).Run(ctx, args)
 	case "replicate":
 		c := NewReplicateCommand()
 		if err := c.ParseFlags(ctx, args); err != nil {
@@ -118,12 +116,10 @@ func (m *Main) Run(ctx context.Context, args []string) (err error) {
 
 	case "restore":
 		return (&RestoreCommand{}).Run(ctx, args)
-	case "snapshots":
-		return (&SnapshotsCommand{}).Run(ctx, args)
 	case "version":
 		return (&VersionCommand{}).Run(ctx, args)
 	case "wal":
-		return (&WALCommand{}).Run(ctx, args)
+		return (&LTXCommand{}).Run(ctx, args)
 	default:
 		if cmd == "" || cmd == "help" || strings.HasPrefix(cmd, "-") {
 			m.Usage()
@@ -145,10 +141,8 @@ Usage:
 The commands are:
 
 	databases    list databases specified in config file
-	generations  list available generations for a database
 	replicate    runs a server to replicate databases
 	restore      recovers database backup from a replica
-	snapshots    list available snapshots for a database
 	version      prints the binary version
 	wal          list available WAL files for a database
 `[1:])
@@ -298,7 +292,8 @@ type DBConfig struct {
 	MinCheckpointPageN *int           `yaml:"min-checkpoint-page-count"`
 	MaxCheckpointPageN *int           `yaml:"max-checkpoint-page-count"`
 
-	Replicas []*ReplicaConfig `yaml:"replicas"`
+	Replica  *ReplicaConfig   `yaml:"replica"`
+	Replicas []*ReplicaConfig `yaml:"replicas"` // Deprecated
 }
 
 // NewDBFromConfig instantiates a DB based on a configuration.
@@ -331,14 +326,29 @@ func NewDBFromConfig(dbc *DBConfig) (*litestream.DB, error) {
 		db.MaxCheckpointPageN = *dbc.MaxCheckpointPageN
 	}
 
-	// Instantiate and attach replicas.
-	for _, rc := range dbc.Replicas {
-		r, err := NewReplicaFromConfig(rc, db)
-		if err != nil {
-			return nil, err
-		}
-		db.Replicas = append(db.Replicas, r)
+	// Instantiate and attach replica.
+	// v0.3.x and before supported multiple replicas but that was dropped to
+	// ensure there's a single remote data authority.
+	if dbc.Replica == nil && len(dbc.Replicas) == 0 {
+		return nil, fmt.Errorf("must specify replica for database")
+	} else if dbc.Replica != nil && len(dbc.Replicas) > 0 {
+		return nil, fmt.Errorf("cannot specify 'replica' and 'replicas' on a database")
+	} else if len(dbc.Replicas) > 1 {
+		return nil, fmt.Errorf("multiple replicas on a single database are no longer supported")
 	}
+
+	var rc *ReplicaConfig
+	if dbc.Replica != nil {
+		rc = dbc.Replica
+	} else {
+		rc = dbc.Replicas[0]
+	}
+
+	r, err := NewReplicaFromConfig(rc, db)
+	if err != nil {
+		return nil, err
+	}
+	db.Replica = r
 
 	return db, nil
 }
@@ -346,13 +356,12 @@ func NewDBFromConfig(dbc *DBConfig) (*litestream.DB, error) {
 // ReplicaConfig represents the configuration for a single replica in a database.
 type ReplicaConfig struct {
 	Type                   string         `yaml:"type"` // "file", "s3"
-	Name                   string         `yaml:"name"` // name of replica, optional.
+	Name                   string         `yaml:"name"` // Deprecated
 	Path                   string         `yaml:"path"`
 	URL                    string         `yaml:"url"`
 	Retention              *time.Duration `yaml:"retention"`
 	RetentionCheckInterval *time.Duration `yaml:"retention-check-interval"`
 	SyncInterval           *time.Duration `yaml:"sync-interval"`
-	SnapshotInterval       *time.Duration `yaml:"snapshot-interval"`
 	ValidationInterval     *time.Duration `yaml:"validation-interval"`
 
 	// S3 settings
@@ -398,9 +407,6 @@ func NewReplicaFromConfig(c *ReplicaConfig, db *litestream.DB) (_ *litestream.Re
 	}
 	if v := c.SyncInterval; v != nil {
 		r.SyncInterval = *v
-	}
-	if v := c.SnapshotInterval; v != nil {
-		r.SnapshotInterval = *v
 	}
 	if v := c.ValidationInterval; v != nil {
 		r.ValidationInterval = *v
@@ -765,23 +771,23 @@ func expand(s string) (string, error) {
 	return filepath.Join(u.HomeDir, strings.TrimPrefix(s, prefix)), nil
 }
 
-// indexVar allows the flag package to parse index flags as 4-byte hexadecimal values.
-type indexVar int
+// txidVar allows the flag package to parse index flags as hex-formatted TXIDs
+type txidVar ltx.TXID
 
 // Ensure type implements interface.
-var _ flag.Value = (*indexVar)(nil)
+var _ flag.Value = (*txidVar)(nil)
 
 // String returns an 8-character hexadecimal value.
-func (v *indexVar) String() string {
-	return fmt.Sprintf("%08x", int(*v))
+func (v *txidVar) String() string {
+	return ltx.TXID(*v).String()
 }
 
 // Set parses s into an integer from a hexadecimal value.
-func (v *indexVar) Set(s string) error {
-	i, err := strconv.ParseInt(s, 16, 32)
+func (v *txidVar) Set(s string) error {
+	txID, err := ltx.ParseTXID(s)
 	if err != nil {
-		return fmt.Errorf("invalid hexadecimal format")
+		return fmt.Errorf("invalid txid format")
 	}
-	*v = indexVar(i)
+	*v = txidVar(txID)
 	return nil
 }
